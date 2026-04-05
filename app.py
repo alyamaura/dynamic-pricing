@@ -5,92 +5,81 @@ import requests
 import os
 
 app = Flask(__name__)
-CORS(app)  # Penting! Agar Appsmith bisa akses
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Isi ini setelah setup Baserow nanti
-BASEROW_TOKEN = os.environ.get("BASEROW_TOKEN", "")
+BASEROW_TOKEN    = os.environ.get("BASEROW_TOKEN", "")
 BASEROW_TABLE_ID = os.environ.get("BASEROW_TABLE_ID", "")
+
 
 @app.route("/")
 def home():
-    return jsonify({"status": "Dynamic Pricing API berjalan!", "versi": "1.0"})
+    return jsonify({"status": "ok", "pesan": "Dynamic Pricing API aktif"})
+
 
 @app.route("/simulate", methods=["POST"])
 def simulate():
-    """
-    Endpoint utama: terima input, jalankan simulasi, simpan ke Baserow.
-    
-    Contoh input JSON:
-    {
-        "biaya_produksi": 15000,
-        "harga_awal": 25000,
-        "demand_awal": 100,
-        "elastisitas": 0.8,
-        "nama_produk": "Keripik Singkong"
-    }
-    """
     try:
-        data = request.get_json()
-        
-        # Validasi input
-        required_fields = ["biaya_produksi", "harga_awal", "demand_awal", "elastisitas"]
-        for field in required_fields:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({"error": "Body kosong. Kirim data JSON."}), 400
+
+        # Cek field wajib
+        for field in ["biaya_produksi", "harga_awal", "demand_awal", "elastisitas"]:
             if field not in data:
-                return jsonify({"error": f"Field '{field}' wajib diisi"}), 400
-        
-        biaya = float(data["biaya_produksi"])
-        harga_awal = float(data["harga_awal"])
+                return jsonify({"error": f"Field '{field}' wajib diisi."}), 400
+
+        biaya       = float(data["biaya_produksi"])
+        harga_awal  = float(data["harga_awal"])
         demand_awal = float(data["demand_awal"])
         elastisitas = float(data["elastisitas"])
-        nama_produk = data.get("nama_produk", "Produk")
-        
-        # Validasi logika bisnis
-        if biaya >= harga_awal:
-            return jsonify({"error": "Biaya produksi harus lebih kecil dari harga jual"}), 400
+        nama_produk = str(data.get("nama_produk", "Produk"))
+
+        # Validasi logika
+        if biaya <= 0:
+            return jsonify({"error": "Biaya produksi harus lebih dari 0."}), 400
+        if harga_awal <= biaya:
+            return jsonify({"error": "Harga jual harus lebih besar dari biaya produksi."}), 400
         if demand_awal <= 0:
-            return jsonify({"error": "Perkiraan permintaan harus lebih dari 0"}), 400
-        
+            return jsonify({"error": "Perkiraan permintaan harus lebih dari 0."}), 400
+        if not (0.05 <= elastisitas <= 5.0):
+            return jsonify({"error": "Elastisitas harus antara 0.05 dan 5.0."}), 400
+
         # Jalankan simulasi
         hasil = run_simulation(biaya, harga_awal, demand_awal, elastisitas)
-        
-        # Simpan ke Baserow (kalau token sudah diisi)
+
+        # Simpan ke Baserow jika sudah dikonfigurasi
         if BASEROW_TOKEN and BASEROW_TABLE_ID:
-            simpan_ke_baserow(nama_produk, biaya, harga_awal, demand_awal, elastisitas, hasil)
-        
-        return jsonify({
-            "sukses": True,
-            "nama_produk": nama_produk,
-            "hasil": hasil
-        })
-    
+            _simpan_baserow(nama_produk, biaya, harga_awal, demand_awal, elastisitas, hasil)
+
+        return jsonify({"sukses": True, "nama_produk": nama_produk, "hasil": hasil})
+
     except ValueError as e:
-        return jsonify({"error": f"Nilai tidak valid: {str(e)}"}), 400
+        return jsonify({"error": f"Format angka tidak valid: {str(e)}"}), 400
     except Exception as e:
-        return jsonify({"error": f"Terjadi kesalahan: {str(e)}"}), 500
+        return jsonify({"error": f"Kesalahan server: {str(e)}"}), 500
 
-def simpan_ke_baserow(nama_produk, biaya, harga_awal, demand_awal, elastisitas, hasil):
-    """Menyimpan hasil simulasi ke database Baserow."""
-    rekomendasi = hasil["rekomendasi"]
-    
-    url = f"https://api.baserow.io/api/database/rows/table/{BASEROW_TABLE_ID}/?user_field_names=true"
-    headers = {
-        "Authorization": f"Token {BASEROW_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    
-    payload = {
-        "Nama Produk": nama_produk,
-        "Biaya Produksi": biaya,
-        "Harga Awal": harga_awal,
-        "Demand Awal": demand_awal,
-        "Elastisitas": elastisitas,
-        "Harga Optimal": rekomendasi["harga_optimal"],
-        "Profit Maksimal": rekomendasi["profit_maksimal"],
-        "Peningkatan Profit (%)": rekomendasi["peningkatan_profit_persen"]
-    }
-    
-    requests.post(url, json=payload, headers=headers)
 
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+def _simpan_baserow(nama, biaya, harga_awal, demand_awal, elastisitas, hasil):
+    rek = hasil["rekomendasi"]
+    try:
+        requests.post(
+            f"https://api.baserow.io/api/database/rows/table/{BASEROW_TABLE_ID}/"
+            "?user_field_names=true",
+            headers={
+                "Authorization": f"Token {BASEROW_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "Nama Produk":            nama,
+                "Biaya Produksi":         biaya,
+                "Harga Awal":             harga_awal,
+                "Demand Awal":            demand_awal,
+                "Elastisitas":            elastisitas,
+                "Harga Optimal":          rek["harga_optimal"],
+                "Profit Maksimal":        rek["profit_maksimal"],
+                "Peningkatan Profit (%)": rek["peningkatan_profit_persen"]
+            },
+            timeout=5
+        )
+    except Exception:
+        pass
